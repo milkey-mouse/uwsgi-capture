@@ -1,65 +1,23 @@
+#include "v4l.h"
+#include "util.h"
 #include <inttypes.h>
 #include <linux/videodev2.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <uwsgi.h>
 
 extern struct uwsgi_server uwsgi;
-struct uwsgi_sharedarea *sa;
+extern struct uwsgi_python up;
+static struct uwsgi_sharedarea *sa;
 
-static struct {
-  uint16_t quality, fps;
-  bool hf;
-  char *name;
-  char *path;
-  uint16_t resolution[2];
-} ctx = {.quality = 80,
-         .fps = 255,
-         .hf = 0,
-         .name = "Unknown",
-         .path = "/dev/video0",
-         .resolution = {640, 480}};
-
-#define IOCTL_RETRY 4
-
-// ioctl with a number of retries in the case of I/O failure
-int xioctl(int fd, int ctl, void *arg) {
-  int ret = 0;
-  int tries = IOCTL_RETRY;
-  do {
-    ret = ioctl(fd, ctl, arg);
-  } while (ret && tries-- &&
-           ((errno == EINTR) || (errno == EAGAIN) || (errno == ETIMEDOUT)));
-
-  if (ret && (tries <= 0)) {
-    uwsgi_debug("ioctl (%i) retried %i times - giving up: %s\n", ctl,
-                IOCTL_RETRY, strerror(errno));
-  }
-
-  return (ret);
-}
-
-void uwsgi_opt_set_8bit(char *opt, char *value, void *key) {
-  uint8_t *ptr = (uint8_t *)key;
-
-  if (value) {
-    unsigned long n = strtoul(value, NULL, 10);
-    if (n > 255)
-      n = 255;
-    *ptr = n;
-  } else {
-    *ptr = 1;
-  }
-}
-
-static void uwsgi_opt_set_resolution(char *opt, char *value, void *key) {
-  int *res = (int *)key;
-  if (sscanf(optarg, SCNu16 "x" SCNu16, &res[0], &res[1]) != 2) {
-    uwsgi_log("Invalid resolution '%s' specified", optarg);
-    exit(EXIT_FAILURE);
-  }
-}
+static capture_context ctx = {.quality = 80,
+                              .fps = 255,
+                              .hf = 0,
+                              .name = "Unknown",
+                              .path = "/dev/video0",
+                              .resolution = {640, 480}};
 
 static struct uwsgi_option capture_options[] = {
     {"v4l-device", required_argument, 0,
@@ -189,7 +147,7 @@ static int captureinit() {
   memset(&in_struct, 0, sizeof(in_struct));
   in_struct.index = 0;
   if (!xioctl(fd, VIDIOC_ENUMINPUT, &in_struct)) {
-    ctx.name = strdup(in_struct.name);
+    ctx.name = strdup((const char *)in_struct.name);
   }
 
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -205,7 +163,7 @@ static int captureinit() {
 
 void captureloop() {
 
-  while (1) {
+  while (true) {
     struct pollfd p;
     p.events = POLLIN;
     p.fd = sa->fd;
