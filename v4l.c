@@ -1,107 +1,218 @@
+#include <inttypes.h>
 #include <linux/videodev2.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 #include <uwsgi.h>
 
 extern struct uwsgi_server uwsgi;
+struct uwsgi_sharedarea *sa;
 
-struct capture_config {
-  char *v4l_device;
-  struct v4l2_format fmt;
-  struct v4l2_requestbuffers req;
-  struct uwsgi_sharedarea *sa;
-} ucapture;
+static struct {
+  uint16_t quality, fps;
+  bool hf;
+  char *name;
+  char *path;
+  uint16_t resolution[2];
+} ctx = {.quality = 80,
+         .fps = 255,
+         .hf = 0,
+         .name = "Unknown",
+         .path = "/dev/video0",
+         .resolution = {640, 480}};
+
+#define IOCTL_RETRY 4
+
+// ioctl with a number of retries in the case of I/O failure
+int xioctl(int fd, int ctl, void *arg) {
+  int ret = 0;
+  int tries = IOCTL_RETRY;
+  do {
+    ret = ioctl(fd, ctl, arg);
+  } while (ret && tries-- &&
+           ((errno == EINTR) || (errno == EAGAIN) || (errno == ETIMEDOUT)));
+
+  if (ret && (tries <= 0)) {
+    uwsgi_debug("ioctl (%i) retried %i times - giving up: %s\n", ctl,
+                IOCTL_RETRY, strerror(errno));
+  }
+
+  return (ret);
+}
+
+void uwsgi_opt_set_8bit(char *opt, char *value, void *key) {
+  uint8_t *ptr = (uint8_t *)key;
+
+  if (value) {
+    unsigned long n = strtoul(value, NULL, 10);
+    if (n > 255)
+      n = 255;
+    *ptr = n;
+  } else {
+    *ptr = 1;
+  }
+}
+
+static void uwsgi_opt_set_resolution(char *opt, char *value, void *key) {
+  int *res = (int *)key;
+  if (sscanf(optarg, SCNu16 "x" SCNu16, &res[0], &res[1]) != 2) {
+    uwsgi_log("Invalid resolution '%s' specified", optarg);
+    exit(EXIT_FAILURE);
+  }
+}
 
 static struct uwsgi_option capture_options[] = {
-	{"v4l-capture", required_argument, 0, "start capturing from the specified v4l device", uwsgi_opt_set_str, &ucapture.v4l_device, 0},
-	{ NULL, 0, 0, NULL, NULL, NULL, 0},
+    {"v4l-device", required_argument, 0,
+     "capture from the specified v4l device", uwsgi_opt_set_str, &ctx.path, 0},
+    {"resolution", required_argument, 0, "resolution of the captured video",
+     uwsgi_opt_set_resolution, ctx.resolution, 0},
+    {"quality", required_argument, 0, "JPEG quality (0-100) of each frame",
+     uwsgi_opt_set_8bit, &ctx.quality, 0},
+    {"fps", required_argument, 0, "number of frames to generate per second",
+     uwsgi_opt_set_8bit, &ctx.fps, 0},
+    {"hf", no_argument, 0, "flip the video horizontally", uwsgi_opt_true,
+     &ctx.hf, 0},
+    {NULL, 0, 0, NULL, NULL, NULL, 0},
 };
 
 static int captureinit() {
-  if (!ucapture.v4l_device)
-    return 0;
-
-  int fd = open(ucapture.v4l_device, O_RDWR | O_NONBLOCK);
-  if (fd < 0) {
-    uwsgi_error_open(ucapture.v4l_device);
-    exit(1);
+  if (ctx.quality > 100) {
+    ctx.quality = 100;
   }
 
-  ucapture.req.count = 1;
-  ucapture.req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  ucapture.req.memory = V4L2_MEMORY_MMAP;
-
-  if (ioctl(fd, VIDIOC_REQBUFS, &ucapture.req) < 0) {
-    uwsgi_error("ioctl()");
-    exit(1);
+  int fd = open(ctx.path, O_RDWR | O_NONBLOCK);
+  if (fd == -1) {
+    uwsgi_log("Error opening V4L interface");
+    exit(EXIT_FAILURE);
   }
 
-  memset(&ucapture.fmt, 0, sizeof(struct v4l2_format));
-  ucapture.fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (ioctl(fd, VIDIOC_G_FMT, &ucapture.fmt) < 0) {
-    uwsgi_error("ioctl()");
-    exit(1);
+  struct v4l2_capability cap;
+  memset(&cap, 0, sizeof(cap));
+  if (xioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
+    uwsgi_log("Error opening device %s: unable to query device.", ctx.path);
+    exit(EXIT_FAILURE);
   }
 
-  uwsgi_log("%s detected width = %d\n", ucapture.v4l_device,
-            ucapture.fmt.fmt.pix.width);
-  uwsgi_log("%s detected height = %d\n", ucapture.v4l_device,
-            ucapture.fmt.fmt.pix.height);
-  uwsgi_log("%s detected format = %.*s\n", ucapture.v4l_device, 4,
-            &ucapture.fmt.fmt.pix.pixelformat);
+  if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
+    uwsgi_log("Error opening device %s: video capture not supported.",
+              ctx.path);
+  }
+
+  if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
+    uwsgi_log("Device %s does not support streaming I/O", ctx.path);
+  }
+
+  struct v4l2_format fmt;
+  memset(&fmt, 0, sizeof(fmt));
+  fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  fmt.fmt.pix.width = ctx.resolution[0];
+  fmt.fmt.pix.height = ctx.resolution[1];
+  fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+  fmt.fmt.pix.field = V4L2_FIELD_ANY;
+  if (xioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+    uwsgi_log("Unable to set pixel format MJPEG @ resolution %dx%d",
+              ctx.resolution[0], ctx.resolution[1]);
+    exit(EXIT_FAILURE);
+  }
+
+  if (fmt.fmt.pix.width != ctx.resolution[0] ||
+      fmt.fmt.pix.height != ctx.resolution[1]) {
+    uwsgi_log("Specified resolution is unavailable, using %dx%d instead",
+              fmt.fmt.pix.width, fmt.fmt.pix.height);
+    ctx.resolution[0] = fmt.fmt.pix.width;
+    ctx.resolution[1] = fmt.fmt.pix.height;
+  }
+
+  if (fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_MJPEG &&
+      fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_JPEG) {
+    uwsgi_log("Device %s does not support native MJPEG encoding", ctx.path);
+    exit(EXIT_FAILURE);
+  }
+
+  struct v4l2_streamparm setfps;
+  memset(&setfps, 0, sizeof(setfps));
+  setfps.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+  if (xioctl(fd, VIDIOC_G_PARM, &setfps) < 0 ||
+      !(setfps.parm.capture.capability & V4L2_CAP_TIMEPERFRAME)) {
+    uwsgi_log("Can't change FPS for device %s", ctx.path);
+  } else {
+    memset(&setfps, 0, sizeof(setfps));
+    setfps.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    setfps.parm.capture.timeperframe.numerator = 1;
+    setfps.parm.capture.timeperframe.denominator = ctx.fps;
+
+    if (xioctl(fd, VIDIOC_S_PARM, &setfps)) {
+      uwsgi_log("Can't set FPS of device %s", ctx.path);
+    }
+  }
+
+  struct v4l2_requestbuffers rb;
+  rb.count = 1;
+  rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  rb.memory = V4L2_MEMORY_MMAP;
+
+  if (xioctl(fd, VIDIOC_REQBUFS, &rb) < 0) {
+    uwsgi_log("Unable to allocate/mmap buffer for device %s", ctx.path);
+    exit(EXIT_FAILURE);
+  }
 
   struct v4l2_buffer vbuf;
-  memset(&vbuf, 0, sizeof(struct v4l2_buffer));
+  memset(&vbuf, 0, sizeof(vbuf));
+  vbuf.index = 0;
   vbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   vbuf.memory = V4L2_MEMORY_MMAP;
-  vbuf.index = 0;
-
-  if (ioctl(fd, VIDIOC_QUERYBUF, &vbuf) < 0) {
-    uwsgi_error("ioctl()");
-    exit(1);
+  if (xioctl(fd, VIDIOC_QUERYBUF, &vbuf) < 0) {
+    uwsgi_log("Unable to query mmap'ed buffer for device %s", ctx.path);
+    exit(EXIT_FAILURE);
   }
 
   uint64_t area_len = vbuf.length;
   char *area = mmap(NULL, vbuf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
                     vbuf.m.offset);
 
-  // create a sharedarea on the mmap()'ed region
-  ucapture.sa = uwsgi_sharedarea_init_ptr(area, area_len);
-  ucapture.sa->fd = fd;
-  ucapture.sa->honour_used = 1;
+  sa = uwsgi_sharedarea_init_ptr(area, area_len);
+  sa->fd = fd;
+  sa->honour_used = 1;
 
-  memset(&vbuf, 0, sizeof(struct v4l2_buffer));
+  memset(&vbuf, 0, sizeof(vbuf));
   vbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   vbuf.memory = V4L2_MEMORY_MMAP;
   vbuf.index = 0;
 
-  // enqueue the buf
-  if (ioctl(fd, VIDIOC_QBUF, &vbuf) < 0) {
-    uwsgi_error("ioctl()");
-    exit(1);
+  if (xioctl(fd, VIDIOC_QBUF, &vbuf) < 0) {
+    uwsgi_log("Unable to queue mmap'ed buffer for device %s", ctx.path);
+    exit(EXIT_FAILURE);
   }
 
-  // start streaming data
-  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (ioctl(fd, VIDIOC_STREAMON, &type) < 0) {
-    uwsgi_error("ioctl()");
-    exit(1);
+  struct v4l2_input in_struct;
+  memset(&in_struct, 0, sizeof(in_struct));
+  in_struct.index = 0;
+  if (!xioctl(fd, VIDIOC_ENUMINPUT, &in_struct)) {
+    ctx.name = strdup(in_struct.name);
   }
 
-  uwsgi_log("%s started streaming frames to sharedarea %d\n",
-            ucapture.v4l_device, ucapture.sa->id);
+  int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  if (xioctl(fd, VIDIOC_STREAMON, &type) < 0) {
+    uwsgi_log("Unable to start capture stream for device %s", ctx.path);
+    exit(EXIT_FAILURE);
+  }
+
+  uwsgi_log("%s started streaming frames to sharedarea %d\n", ctx.path, sa->id);
 
   return 0;
 }
 
 void captureloop() {
 
-  for (;;) {
+  while (1) {
     struct pollfd p;
     p.events = POLLIN;
-    p.fd = ucapture.sa->fd;
+    p.fd = sa->fd;
     int ret = poll(&p, 1, -1);
     if (ret < 0) {
-      uwsgi_error("poll()");
-      exit(1);
+      uwsgi_log("poll()");
+      exit(EXIT_FAILURE);
     }
     // uwsgi_log("ret = %d\n", ret);
     struct v4l2_buffer vbuf;
@@ -110,19 +221,19 @@ void captureloop() {
     vbuf.memory = V4L2_MEMORY_MMAP;
 
     // dequeue buf
-    uwsgi_wlock(ucapture.sa->lock);
-    if (ioctl(ucapture.sa->fd, VIDIOC_DQBUF, &vbuf) < 0) {
-      uwsgi_error("ioctl()");
-      exit(1);
+    uwsgi_wlock(sa->lock);
+    if (xioctl(sa->fd, VIDIOC_DQBUF, &vbuf) < 0) {
+      uwsgi_log("ioctl()");
+      exit(EXIT_FAILURE);
     }
-    ucapture.sa->updates++;
-    ucapture.sa->used = (uint64_t)vbuf.bytesused;
-    uwsgi_rwunlock(ucapture.sa->lock);
+    sa->updates++;
+    sa->used = (uint64_t)vbuf.bytesused;
+    uwsgi_rwunlock(sa->lock);
 
     // re-enqueue buf
-    if (ioctl(ucapture.sa->fd, VIDIOC_QBUF, &vbuf) < 0) {
-      uwsgi_error("ioctl()");
-      exit(1);
+    if (xioctl(sa->fd, VIDIOC_QBUF, &vbuf) < 0) {
+      uwsgi_log("ioctl()");
+      exit(EXIT_FAILURE);
     }
   }
 }
