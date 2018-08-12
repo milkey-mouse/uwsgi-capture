@@ -1,5 +1,10 @@
 #pragma once
 
+#include <inttypes.h>
+#ifndef SCNu16
+#define SCNu16 "u"
+#endif
+
 #define IOCTL_RETRY 4
 int xioctl(int fd, int ctl, void *arg);
 

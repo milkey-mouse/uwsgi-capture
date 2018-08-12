@@ -38,8 +38,8 @@ void uwsgi_opt_set_8bit(char *opt, char *value, void *key) {
 }
 
 void uwsgi_opt_set_resolution(char *opt, char *value, void *key) {
-  int *res = (int *)key;
-  if (sscanf(optarg, SCNu16 "x" SCNu16, &res[0], &res[1]) != 2) {
+  uint16_t *res = (uint16_t *)key;
+  if (sscanf(optarg, "%" SCNu16 "x%" SCNu16, &res[0], &res[1]) != 2) {
     uwsgi_log("Invalid resolution '%s' specified\n", optarg);
     exit(EXIT_FAILURE);
   }

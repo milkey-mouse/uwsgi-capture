@@ -1,2 +1,2 @@
 NAME="capture"
-GCC_LIST=["capture", "module", "util", "v4l"]
+GCC_LIST=["capture", "control", "module", "util", "v4l"]

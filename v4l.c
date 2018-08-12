@@ -16,7 +16,10 @@ static capture_context default_ctx = {.quality = 80,
                                       .hf = false,
                                       .name = "Unknown",
                                       .path = "/dev/video0",
-                                      .resolution = {640, 480}};
+                                      .resolution = {640, 480},
+                                      .controls = NULL,
+                                      .control_count = 0,
+                                      .sa = NULL};
 
 void capture_ctx_init(capture_context *ctx) { *ctx = default_ctx; }
 
@@ -93,6 +96,7 @@ int capture_ctx_v4l_init(capture_context *ctx) {
   }
 
   struct v4l2_requestbuffers rb;
+  memset(&rb, 0, sizeof(rb));
   rb.count = 1;
   rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   rb.memory = V4L2_MEMORY_MMAP;
