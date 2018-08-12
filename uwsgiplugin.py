@@ -1,4 +1,2 @@
-from glob import glob
-
-NAME='capture'
-GCC_LIST=glob("*.c")
+NAME="capture"
+GCC_LIST=["capture", "module", "util", "v4l"]

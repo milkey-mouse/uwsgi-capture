@@ -1,12 +1,11 @@
+#include "util.h"
+#include "uwsgiwrap.h"
 #include <errno.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <uwsgi.h>
-
-#define IOCTL_RETRY 4
 
 // ioctl with a number of retries in the case of I/O failure
 int xioctl(int fd, int ctl, void *arg) {
@@ -41,7 +40,12 @@ void uwsgi_opt_set_8bit(char *opt, char *value, void *key) {
 void uwsgi_opt_set_resolution(char *opt, char *value, void *key) {
   int *res = (int *)key;
   if (sscanf(optarg, SCNu16 "x" SCNu16, &res[0], &res[1]) != 2) {
-    uwsgi_log("Invalid resolution '%s' specified", optarg);
+    uwsgi_log("Invalid resolution '%s' specified\n", optarg);
     exit(EXIT_FAILURE);
   }
+}
+
+void uwsgi_opt_set_str_and_add_mule(char *opt, char *value, void *key) {
+  uwsgi_opt_set_str(opt, value, key);
+  uwsgi_opt_add_mule(NULL, "capture_loop()", NULL);
 }
