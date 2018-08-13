@@ -5,12 +5,12 @@
 #include <linux/videodev2.h>
 #include <string.h>
 
-static int is_v4l_control(int fd, unsigned int id) {
+static int is_v4l_control(capture_context *ctx, unsigned int id) {
   struct v4l2_queryctrl queryctrl;
   memset(&queryctrl, 0, sizeof(queryctrl));
   queryctrl.id = id;
 
-  int ret = xioctl(fd, VIDIOC_QUERYCTRL, &queryctrl);
+  int ret = xioctl(ctx->sa->fd, VIDIOC_QUERYCTRL, &queryctrl);
   if (ret < 0) {
     uwsgi_error("querycontrol ioctl() failed");
     return ret;
@@ -33,8 +33,8 @@ static int is_v4l_control(int fd, unsigned int id) {
   return -1;
 }
 
-int v4l_get_control(int fd, unsigned int id) {
-  int ret = is_v4l_control(fd, id);
+int v4l_get_control(capture_context *ctx, unsigned int id) {
+  int ret = is_v4l_control(ctx, id);
   if (ret < 0) {
     return ret;
   }
@@ -42,7 +42,7 @@ int v4l_get_control(int fd, unsigned int id) {
   struct v4l2_control control_s;
   memset(&control_s, 0, sizeof(control_s));
   control_s.id = id;
-  ret = xioctl(fd, VIDIOC_G_CTRL, &control_s);
+  ret = xioctl(ctx->sa->fd, VIDIOC_G_CTRL, &control_s);
   if (ret < 0) {
     uwsgi_error("getcontrol ioctl() failed");
     return ret;
@@ -51,8 +51,8 @@ int v4l_get_control(int fd, unsigned int id) {
   return control_s.value;
 }
 
-int v4l_set_control(int fd, unsigned int id, int value, capture_context *ctx) {
-  int ret = is_v4l_control(fd, id);
+int v4l_set_control(capture_context *ctx, unsigned int id, int value) {
+  int ret = is_v4l_control(ctx, id);
   if (ret < 0) {
     uwsgi_log("tried to set invalid control id 0x%08x\n", id);
     return ret;
@@ -80,7 +80,7 @@ int v4l_set_control(int fd, unsigned int id, int value, capture_context *ctx) {
       memset(&control_s, 0, sizeof(control_s));
       control_s.id = id;
       control_s.value = value;
-      int ret = xioctl(fd, VIDIOC_S_CTRL, &control_s);
+      int ret = xioctl(ctx->sa->fd, VIDIOC_S_CTRL, &control_s);
       if (ret < 0) {
         uwsgi_error("ioctl() failed");
         return ret;
@@ -120,7 +120,7 @@ int v4l_set_control(int fd, unsigned int id, int value, capture_context *ctx) {
 
     ext_ctrls.count = 1;
     ext_ctrls.controls = &ext_ctrl;
-    ret = xioctl(fd, VIDIOC_S_EXT_CTRLS, &ext_ctrls);
+    ret = xioctl(ctx->sa->fd, VIDIOC_S_EXT_CTRLS, &ext_ctrls);
     if (ret) {
       uwsgi_log("control id: 0x%08x failed to set value (error %i)\n",
                 ext_ctrl.id, ret);
@@ -130,8 +130,8 @@ int v4l_set_control(int fd, unsigned int id, int value, capture_context *ctx) {
   }
 }
 
-int v4l_reset_control(int fd, unsigned int id) {
-  int ret = is_v4l_control(fd, id);
+int v4l_reset_control(capture_context *ctx, unsigned int id) {
+  int ret = is_v4l_control(ctx, id);
   if (ret < 0) {
     return ret;
   }
@@ -140,7 +140,7 @@ int v4l_reset_control(int fd, unsigned int id) {
   memset(&queryctrl, 0, sizeof(queryctrl));
   queryctrl.id = id;
 
-  ret = xioctl(fd, VIDIOC_QUERYCTRL, &queryctrl);
+  ret = xioctl(ctx->sa->fd, VIDIOC_QUERYCTRL, &queryctrl);
   if (ret < 0) {
     uwsgi_error("querycontrol ioctl() failed");
     return -1;
@@ -150,7 +150,7 @@ int v4l_reset_control(int fd, unsigned int id) {
   memset(&control_s, 0, sizeof(control_s));
   control_s.value = queryctrl.default_value;
   control_s.id = id;
-  ret = xioctl(fd, VIDIOC_S_CTRL, &control_s);
+  ret = xioctl(ctx->sa->fd, VIDIOC_S_CTRL, &control_s);
   if (ret < 0) {
     uwsgi_error("setcontrol ioctl() failed");
     return -1;
@@ -159,8 +159,7 @@ int v4l_reset_control(int fd, unsigned int id) {
   return 0;
 }
 
-static void v4l_add_control(int fd, struct v4l2_queryctrl *ctrl,
-                            capture_context *ctx) {
+static void v4l_add_control(capture_context *ctx, struct v4l2_queryctrl *ctrl) {
   struct v4l2_control c;
   memset(&c, 0, sizeof(c));
   c.id = ctrl->id;
@@ -180,7 +179,7 @@ static void v4l_add_control(int fd, struct v4l2_queryctrl *ctrl,
       memset(&qm, 0, sizeof(struct v4l2_querymenu));
       qm.id = ctrl->id;
       qm.index = i;
-      if (xioctl(fd, VIDIOC_QUERYMENU, &qm) == 0) {
+      if (xioctl(ctx->sa->fd, VIDIOC_QUERYMENU, &qm) == 0) {
         memcpy(&ctx->in_parameters[ctx->control_count].menuitems[i], &qm,
                sizeof(struct v4l2_querymenu));
         DBG("Menu item %d: %s\n", qm.index, qm.name);
@@ -200,7 +199,7 @@ static void v4l_add_control(int fd, struct v4l2_queryctrl *ctrl,
 
   int ret = -1;
   if (ctx->controls[ctx->control_count].class_id == V4L2_CTRL_CLASS_USER) {
-    ret = xioctl(fd, VIDIOC_G_CTRL, &c);
+    ret = xioctl(ctx->sa->fd, VIDIOC_G_CTRL, &c);
     if (ret < 0) {
       uwsgi_log("unable to get the value of control %s", ctrl->name);
     } else {
@@ -221,7 +220,7 @@ static void v4l_add_control(int fd, struct v4l2_queryctrl *ctrl,
 #endif
     ext_ctrls.count = 1;
     ext_ctrls.controls = &ext_ctrl;
-    ret = xioctl(fd, VIDIOC_G_EXT_CTRLS, &ext_ctrls);
+    ret = xioctl(ctx->sa->fd, VIDIOC_G_EXT_CTRLS, &ext_ctrls);
     if (ret) {
       switch (ext_ctrl.id) {
       case V4L2_CID_PAN_RESET:
@@ -260,7 +259,7 @@ static void v4l_add_control(int fd, struct v4l2_queryctrl *ctrl,
   ctx->control_count++;
 }
 
-void v4l_enumerate_controls(int fd, capture_context *ctx) {
+void v4l_enumerate_controls(capture_context *ctx) {
   struct v4l2_queryctrl ctrl;
   memset(&ctrl, 0, sizeof(ctrl));
 
@@ -272,11 +271,11 @@ void v4l_enumerate_controls(int fd, capture_context *ctx) {
   // note: use simple ioctl or v4l2_ioctl instead of the xioctl
   ctrl.id = V4L2_CTRL_FLAG_NEXT_CTRL;
   int ret = -1;
-  if (ioctl(fd, VIDIOC_QUERYCTRL, &ctrl) == 0) {
+  if (ioctl(ctx->sa->fd, VIDIOC_QUERYCTRL, &ctrl) == 0) {
     do {
-      v4l_add_control(fd, &ctrl, ctx);
+      v4l_add_control(ctx, &ctrl);
       ctrl.id |= V4L2_CTRL_FLAG_NEXT_CTRL;
-    } while (ioctl(fd, VIDIOC_QUERYCTRL, &ctrl) == 0);
+    } while (ioctl(ctx->sa->fd, VIDIOC_QUERYCTRL, &ctrl) == 0);
   } else
 #endif
   {
@@ -285,19 +284,93 @@ void v4l_enumerate_controls(int fd, capture_context *ctx) {
     // check all the standard controls
     for (int i = V4L2_CID_BASE; i < V4L2_CID_LASTP1; i++) {
       ctrl.id = i;
-      if (ioctl(fd, VIDIOC_QUERYCTRL, &ctrl) == 0) {
-        v4l_add_control(fd, &ctrl, ctx);
+      if (ioctl(ctx->sa->fd, VIDIOC_QUERYCTRL, &ctrl) == 0) {
+        v4l_add_control(ctx, &ctrl);
       }
     }
 
     // check any custom controls
     for (int i = V4L2_CID_PRIVATE_BASE;; i++) {
       ctrl.id = i;
-      ret = ioctl(fd, VIDIOC_QUERYCTRL, &ctrl);
+      ret = ioctl(ctx->sa->fd, VIDIOC_QUERYCTRL, &ctrl);
       if (ret < 0) {
         break;
       }
-      v4l_add_control(fd, &ctrl, ctx);
+      v4l_add_control(ctx, &ctrl);
     }
   }
+}
+
+#define V4L_OPT_SET(vid, var, desc)                                            \
+  if (ctx->control_options.var.set) {                                          \
+    ret = v4l_set_control(ctx, vid, ctx->control_options.var.value);           \
+    if (ret == 0) {                                                            \
+      uwsgi_log("set " desc " of %s to %d\n", ctx->name,                       \
+                ctx->control_options.var.value);                               \
+    } else {                                                                   \
+      uwsgi_log("Failed to set " desc "\n");                                   \
+    }                                                                          \
+  }
+
+int v4l_setup_controls(capture_context *ctx) {
+  int ret;
+
+  V4L_OPT_SET(V4L2_CID_SHARPNESS, sh, "sharpness")
+  V4L_OPT_SET(V4L2_CID_CONTRAST, co, "contrast")
+  V4L_OPT_SET(V4L2_CID_SATURATION, sa, "saturation")
+  V4L_OPT_SET(V4L2_CID_BACKLIGHT_COMPENSATION, bk, "backlight compensation")
+  V4L_OPT_SET(V4L2_CID_ROTATE, rot, "rotation")
+  V4L_OPT_SET(V4L2_CID_HFLIP, hf, "hflip")
+  V4L_OPT_SET(V4L2_CID_VFLIP, vf, "vflip")
+  V4L_OPT_SET(V4L2_CID_VFLIP, pl, "power line filter")
+
+  /*if (settings->br_set) {
+    V4L_OPT_SET(V4L2_CID_AUTOBRIGHTNESS, br_auto, "auto brightness mode")
+
+    if (settings->br_auto == 0) {
+      V4L_OPT_SET(V4L2_CID_BRIGHTNESS, br, "brightness")
+    }
+  }
+
+  if (settings->wb_set) {
+    V4L_OPT_SET(V4L2_CID_AUTO_WHITE_BALANCE, wb_auto, "auto white balance mode")
+
+    if (settings->wb_auto == 0) {
+      V4L_OPT_SET(V4L2_CID_WHITE_BALANCE_TEMPERATURE, wb,
+                  "white balance temperature")
+    }
+  }
+
+  if (settings->ex_set) {
+    V4L_OPT_SET(V4L2_CID_EXPOSURE_AUTO, ex_auto, "exposure mode")
+    if (settings->ex_auto == V4L2_EXPOSURE_MANUAL) {
+      V4L_OPT_SET(V4L2_CID_EXPOSURE_ABSOLUTE, ex, "absolute exposure")
+    }
+  }
+
+  if (settings->gain_set) {
+    V4L_OPT_SET(V4L2_CID_AUTOGAIN, gain_auto, "auto gain mode")
+
+    if (settings->gain_auto == 0) {
+      V4L_OPT_SET(V4L2_CID_GAIN, gain, "gain")
+    }
+  }
+
+  if (settings->cagc_set) {
+    V4L_OPT_SET(V4L2_CID_AUTO_WHITE_BALANCE, cagc_auto, "chroma gain mode")
+
+    if (settings->cagc_auto == 0) {
+      V4L_OPT_SET(V4L2_CID_WHITE_BALANCE_TEMPERATURE, cagc, "chroma gain")
+    }
+  }
+
+  if (settings->cb_set) {
+    V4L_OPT_SET(V4L2_CID_HUE_AUTO, cb_auto, "color balance mode")
+
+    if (settings->cb_auto == 0) {
+      V4L_OPT_SET(V4L2_CID_HUE, cagc, "color balance")
+    }
+  }*/
+
+  return 0;
 }

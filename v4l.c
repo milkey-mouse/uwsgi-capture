@@ -1,4 +1,5 @@
 #include "v4l.h"
+#include "control.h"
 #include "util.h"
 #include "uwsgiwrap.h"
 #include <errno.h>
@@ -13,12 +14,13 @@
 
 static capture_context default_ctx = {.quality = 80,
                                       .fps = 255,
-                                      .hf = false,
                                       .name = "Unknown",
                                       .path = "/dev/video0",
                                       .resolution = {640, 480},
                                       .controls = NULL,
                                       .control_count = 0,
+                                      .control_options.tvnorm =
+                                          V4L2_STD_UNKNOWN,
                                       .sa = NULL};
 
 void capture_ctx_init(capture_context *ctx) { *ctx = default_ctx; }
@@ -130,7 +132,7 @@ int capture_ctx_v4l_init(capture_context *ctx) {
   vbuf.index = 0;
 
   if (xioctl(fd, VIDIOC_QBUF, &vbuf) < 0) {
-    uwsgi_log("Unable to queue mmap'ed buffer for device %s\n", ctx->path);
+    uwsgi_log("unable to queue mmap'ed buffer for device %s\n", ctx->path);
     return -1;
   }
 
@@ -139,6 +141,13 @@ int capture_ctx_v4l_init(capture_context *ctx) {
   in_struct.index = 0;
   if (!xioctl(fd, VIDIOC_ENUMINPUT, &in_struct)) {
     ctx->name = strdup((const char *)in_struct.name);
+  }
+
+  v4l_enumerate_controls(ctx);
+  int ret = v4l_setup_controls(ctx);
+  if (ret < 0) {
+    uwsgi_log("Failed to set up V4L2 controls for device %s\n", ctx->path);
+    return ret;
   }
 
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;

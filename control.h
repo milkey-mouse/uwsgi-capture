@@ -1,8 +1,10 @@
 #pragma once
 
 #include "v4l.h"
-#include <linux/videodev2.h>
 
-int v4l_get_control(int fd, unsigned int id);
-int v4l_set_control(int fd, unsigned int id, int value, capture_context *ctx);
-void v4l_enumerate_controls(int fd, capture_context *ctx);
+int v4l_get_control(capture_context *ctx, unsigned int id);
+int v4l_set_control(capture_context *ctx, unsigned int id, int value);
+int v4l_reset_control(capture_context *ctx, unsigned int id);
+
+int v4l_setup_controls(capture_context *ctx);
+void v4l_enumerate_controls(capture_context *ctx);
